@@ -95,8 +95,8 @@ function levelInfo(){let i=0;for(let k=0;k<LEVELS.length;k++)if(S.xp>=LEVELS[k][
   nextName:next?next[1]:"Max",max:!next};}
 
 /* ---------- FANG REGISTRIEREN ---------- */
-function registerCatch(name,conf){
-  const inf=infoFor(name); const k=inf.key;
+function registerCatch(inf,conf){
+  const k=inf.key;
   const isNew=!S.species[k];
   let pts=RAR_PTS[inf.rar]; if(isNew)pts*=3;
   const t=todayStr();
@@ -118,47 +118,90 @@ function checkBadges(){
 
 /* ---------- DETEKTION-CAPTURE ---------- */
 let lastSeen={};
-function onDetection(name,conf){
-  if(!name)return;
-  conf = (conf==null||isNaN(conf)) ? 75 : Math.round(conf);
-  if(conf<CFG.MIN_CONF)return;
-  const k=keyFor(name), now=Date.now();
-  if(lastSeen[k] && now-lastSeen[k]<CFG.COOLDOWN_MS)return;
-  lastSeen[k]=now;
-  const res=registerCatch(name,conf);
-  renderAll();
-  if(res.isNew)celebrate(res); else toast('🎙️ '+res.inf.de+' · +'+res.pts+' XP');
+
+// Art aus (deutscher Name, wiss. Name) auflösen – wiss. Name ist der zuverlässige Schlüssel
+function resolveSpecies(common, sci){
+  let s = sci && findSpecies(sci);
+  if(!s && common) s = findSpecies(common);
+  if(s) return {key:s[1], de:s[0], sci:s[1], emoji:s[3], rar:s[4]};
+  const key = sci || common;
+  return {key, de:(common||sci), sci:(sci||''), emoji:'🐦', rar:2};
 }
 
-// Öffentlicher Hook für die präzise Variante
-window.Vogeljagd = { report:onDetection, state:()=>S, version:'1.0' };
+// Texte, die KEINE Treffer sind (Status-/Hinweismeldungen) – hart ausschließen
+function isNoise(t){
+  return /keine detekt|no detection|detections will|tippe auf|tap '?start|modell bereit|nehme auf|inferenz|wahrschein|^settings$|einstellung/i.test(t);
+}
 
-// AUTO: DOM nach neuen "Name … NN%"-Einträgen beobachten
+// Aus dem Karten-Text {common, sci, conf} ziehen. Eine echte Treffer-Karte
+// enthält IMMER einen wissenschaftlichen Namen (z.B. "Corvus monedula").
+function extractDetection(text){
+  text = (text||'').replace(/\s+/g,' ').trim();
+  if(!text || text.length>160) return null;
+  if(isNoise(text)) return null;
+  const sciM = text.match(/\b([A-ZÀ-Þ][a-zà-ÿ]+)\s+([a-zà-ÿ]{3,})\b/); // Genus species
+  if(!sciM) return null;
+  const sci = sciM[1]+' '+sciM[2];
+  const before = text.slice(0, sciM.index);                 // alles vor dem wiss. Namen
+  const pm = before.match(/(\d{1,3})(?:[.,]\d+)?\s*%/);     // Konfidenz (vor dem wiss. Namen)
+  const conf = pm ? parseInt(pm[1],10) : 75;
+  let common = pm ? before.slice(0, before.indexOf(pm[0])) : before;
+  common = common.replace(/[•·:|]/g,' ').replace(/\s+/g,' ').trim();
+  if(!common || common.length<2) common = sci;
+  return {common, sci, conf};
+}
+
+function reportDetection(d){
+  if(!d) return;
+  const conf = (d.conf==null||isNaN(d.conf)) ? 75 : Math.round(d.conf);
+  if(conf < CFG.MIN_CONF) return;
+  const inf = resolveSpecies(d.common, d.sci);
+  const now = Date.now();
+  if(lastSeen[inf.key] && now-lastSeen[inf.key] < CFG.COOLDOWN_MS) return;
+  lastSeen[inf.key] = now;
+  const res = registerCatch(inf, conf);
+  renderAll();
+  if(res.isNew) celebrate(res); else toast('🎙️ '+res.inf.de+' · +'+res.pts+' XP');
+}
+
+// Öffentlicher Hook (präzise Variante): window.Vogeljagd.report("Dohle", 98, "Corvus monedula")
+function onDetection(name, conf, sci){ reportDetection({common:name, sci:sci||'', conf}); }
+window.Vogeljagd = { report:onDetection, reportDetection, extract:extractDetection, state:()=>S, version:'1.1' };
+
+// Einmaliges Aufräumen falscher Alt-Einträge (z.B. "Keine Detektionen über")
+function purgeBogus(){
+  let changed=false;
+  Object.keys(S.species).forEach(k=>{
+    const sp=S.species[k];
+    if(isNoise(k) || isNoise((sp&&sp.de)||'')){ delete S.species[k]; changed=true; }
+  });
+  if(changed){
+    S.catches = S.catches.filter(c=>S.species[c.k]);
+    // XP sauber neu berechnen aus den verbliebenen Fängen
+    const chron=[...S.catches].sort((a,b)=>a.t-b.t); const seen=new Set(); let xp=0;
+    chron.forEach(c=>{ const r=(S.species[c.k]&&S.species[c.k].rar)||2; let p=RAR_PTS[r]; if(!seen.has(c.k)){p*=3;seen.add(c.k);} xp+=p; });
+    S.xp=xp; save();
+  }
+}
+
 let calibrate=false;
 function startObserver(){
   if(!CFG.AUTO_CAPTURE)return;
   const root = (CFG.DETECTION_CONTAINER && document.querySelector(CFG.DETECTION_CONTAINER)) || document.body;
-  const seenText=new Set();
-  const rx=/([A-Za-zÀ-ÿ' .\-]{3,40}?)\s*[·:]?\s*(\d{1,3})\s*%/;
+  const seen=new Set();
   const handle=node=>{
-    if(!node)return;
-    const txt=(node.textContent||'').trim();
-    if(!txt||txt.length>120)return;
-    const m=txt.match(rx);
-    if(!m)return;
-    const name=m[1].trim().replace(/\s+/g,' ');
-    const conf=parseInt(m[2],10);
-    if(name.length<3||/start|stop|setting|detection|confidence|sicher/i.test(name))return;
-    const sig=name+'|'+conf;
-    if(seenText.has(sig))return; seenText.add(sig);
-    setTimeout(()=>seenText.delete(sig),CFG.COOLDOWN_MS);
-    if(calibrate){ toast('Kalibrierung erkannt: "'+name+'" ('+conf+'%)'); }
-    onDetection(name,conf);
+    if(!node || node.nodeType!==1)return;
+    const d=extractDetection(node.textContent||'');
+    if(!d)return;
+    const sig=d.sci+'|'+d.conf;
+    if(seen.has(sig))return; seen.add(sig); setTimeout(()=>seen.delete(sig),4000);
+    if(calibrate) toast('Kalibrierung: "'+d.common+'" ('+d.sci+', '+d.conf+'%)');
+    reportDetection(d);
   };
   const obs=new MutationObserver(muts=>{
     muts.forEach(m=>{
-      m.addedNodes && m.addedNodes.forEach(n=>{ if(n.nodeType===1){handle(n); n.querySelectorAll&&n.querySelectorAll('*').forEach(handle);} });
-      if(m.type==='characterData')handle(m.target.parentElement);
+      m.addedNodes && m.addedNodes.forEach(n=>{ if(n.nodeType===1){ handle(n); n.querySelectorAll && n.querySelectorAll('*').forEach(handle); } });
+      if(m.type==='characterData') handle(m.target.parentElement);
     });
   });
   obs.observe(root,{childList:true,subtree:true,characterData:true});
@@ -398,7 +441,7 @@ function maybeIntro(){
 }
 
 /* ---------- START ---------- */
-function init(){ build(); updateFab(); startObserver(); setTimeout(maybeIntro,800); }
+function init(){ build(); purgeBogus(); updateFab(); startObserver(); setTimeout(maybeIntro,800); }
 if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init); else init();
 
 })();
