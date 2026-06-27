@@ -83,7 +83,7 @@ const BADGES=[["frueh","🌅","Frühaufsteher"],["nacht","🦉","Nachtschwärmer
  ["serie7","🔥","7-Tage-Serie"],["hundert","💯","100 Fänge"]];
 
 function fresh(){return {name:"Spieler",avatar:"🐦",xp:0,catches:[],species:{},streak:0,lastDay:null,
-  friends:[],badges:[],seenIntro:false};}
+  friends:[],badges:[],seenIntro:false,clips:{},geo:null};}
 let S=load();
 function load(){try{const r=localStorage.getItem(KEY);if(r)return Object.assign(fresh(),JSON.parse(r));}catch(e){}return fresh();}
 function save(){try{localStorage.setItem(KEY,JSON.stringify(S));}catch(e){}}
@@ -160,6 +160,7 @@ function handleDetection(d){
   if(liveList.length>8)liveList.length=8;
   if(!cd.caught){
     const res=registerCatch(inf,conf);
+    saveClip(inf.key);
     updateHeader();
     if(res.isNew) celebrate(res); else toast('🎙️ '+inf.de+' · +'+res.pts+' XP');
   }
@@ -241,6 +242,95 @@ function syncStart(){
   btn.textContent = on?'■  Stopp':'▶  Start';
   btn.classList.toggle('on',on);
 }
+
+/* ---------- AUDIO-MITSCHNITT (paralleler Mikro-Ringpuffer -> WAV -> IndexedDB) ---------- */
+const CLIP_SEC=5;
+let mic2=null,ac2=null,sp2=null,zg2=null,ring=null,rPos=0,rFill=0,rRate=48000,micOn=false;
+async function startMicCapture(){
+  if(ac2)return true;
+  try{
+    // Mikro ZUERST anfragen (gleiche Nutzer-Geste -> iOS erlaubt es)
+    mic2=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false,channelCount:1}});
+    ac2=new (window.AudioContext||window.webkitAudioContext)();
+    if(ac2.state==='suspended'){ try{await ac2.resume();}catch(e){} }
+    rRate=ac2.sampleRate||48000;
+    const src=ac2.createMediaStreamSource(mic2);
+    ring=new Float32Array(Math.ceil(rRate*CLIP_SEC)); rPos=0; rFill=0;
+    sp2=ac2.createScriptProcessor(4096,1,1);
+    sp2.onaudioprocess=e=>{const ch=e.inputBuffer.getChannelData(0);for(let i=0;i<ch.length;i++){ring[rPos]=ch[i];rPos=(rPos+1)%ring.length;if(rFill<ring.length)rFill++;}};
+    zg2=ac2.createGain(); zg2.gain.value=0;            // stumm, nur zum Laufenhalten
+    src.connect(sp2); sp2.connect(zg2); zg2.connect(ac2.destination);
+    micOn=true; return true;
+  }catch(e){ stopMicCapture(); return false; }
+}
+function stopMicCapture(){
+  micOn=false;
+  try{if(sp2){sp2.disconnect();sp2.onaudioprocess=null;sp2=null;}}catch(e){}
+  try{if(zg2){zg2.disconnect();zg2=null;}}catch(e){}
+  try{if(mic2){mic2.getTracks().forEach(t=>t.stop());mic2=null;}}catch(e){}
+  try{if(ac2){ac2.close();ac2=null;}}catch(e){}
+  ring=null; rFill=0;
+}
+function encodeWav(f32,rate){
+  const len=f32.length, buf=new ArrayBuffer(44+len*2), v=new DataView(buf);
+  const ws=(o,s)=>{for(let i=0;i<s.length;i++)v.setUint8(o+i,s.charCodeAt(i));};
+  ws(0,'RIFF'); v.setUint32(4,36+len*2,true); ws(8,'WAVE'); ws(12,'fmt ');
+  v.setUint32(16,16,true); v.setUint16(20,1,true); v.setUint16(22,1,true);
+  v.setUint32(24,rate,true); v.setUint32(28,rate*2,true); v.setUint16(32,2,true); v.setUint16(34,16,true);
+  ws(36,'data'); v.setUint32(40,len*2,true);
+  let o=44; for(let i=0;i<len;i++){let s=Math.max(-1,Math.min(1,f32[i]));v.setInt16(o,s<0?s*0x8000:s*0x7fff,true);o+=2;}
+  return new Blob([buf],{type:'audio/wav'});
+}
+function snapshotClip(){
+  if(!ring||rFill<rRate*1)return null;          // mind. 1 s Material
+  const n=rFill, out=new Float32Array(n), start=(rPos-n+ring.length)%ring.length;
+  for(let i=0;i<n;i++)out[i]=ring[(start+i)%ring.length];
+  return encodeWav(out,rRate);
+}
+/* IndexedDB für die Audio-Blobs */
+let _db=null;
+function idb(){return new Promise((res,rej)=>{ if(_db)return res(_db);
+  try{ const r=indexedDB.open('vogeljagd',1);
+    r.onupgradeneeded=()=>{ if(!r.result.objectStoreNames.contains('clips'))r.result.createObjectStore('clips'); };
+    r.onsuccess=()=>{_db=r.result;res(_db);}; r.onerror=()=>rej(r.error);
+  }catch(e){rej(e);} });}
+async function idbPut(key,blob){ try{const db=await idb();return await new Promise((res,rej)=>{const tx=db.transaction('clips','readwrite');tx.objectStore('clips').put(blob,key);tx.oncomplete=()=>res(true);tx.onerror=()=>rej(tx.error);});}catch(e){return false;} }
+async function idbGet(key){ try{const db=await idb();return await new Promise((res)=>{const tx=db.transaction('clips','readonly');const rq=tx.objectStore('clips').get(key);rq.onsuccess=()=>res(rq.result||null);rq.onerror=()=>res(null);});}catch(e){return null;} }
+async function saveClip(key){
+  try{ const blob=snapshotClip(); if(!blob)return;
+    if(await idbPut(key,blob)){ S.clips=S.clips||{}; S.clips[key]=true; save(); } }catch(e){}
+}
+
+/* ---------- STANDORT (Ortungsdienste) ---------- */
+function enableLocation(){
+  if(!navigator.geolocation){ toast('Standort nicht verfügbar'); return; }
+  toast('📍 Standort wird angefragt …');
+  navigator.geolocation.getCurrentPosition(
+    pos=>{ S.geo={lat:pos.coords.latitude,lon:pos.coords.longitude,t:Date.now()}; save();
+           driveBirdnetGeo(); toast('📍 Standort aktiv – jetzt Start drücken'); if(curTab==='profil')renderContent(); },
+    ()=>toast('Standort abgelehnt oder Fehler'),
+    {enableHighAccuracy:true,timeout:12000,maximumAge:0}
+  );
+}
+function driveBirdnetGeo(){
+  const cbs=[...document.querySelectorAll('input[type=checkbox]')];
+  const cb=cbs.find(c=>{ if(c.closest&&c.closest('#vj-app'))return false;
+    const t=((c.closest('label')||c.parentElement||{}).textContent||'')+''; return /geolocation|standort|location/i.test(t); });
+  if(cb&&!cb.checked){ try{cb.click();}catch(e){} }
+}
+
+/* ---------- BIRDNET-REGLER FERNSTEUERN (Empfindlichkeit / Schwelle) ---------- */
+function findBirdnetControl(rx){
+  const ins=[...document.querySelectorAll('input[type=range],input[type=number]')];
+  for(const inp of ins){ if(inp.closest&&inp.closest('#vj-app'))continue;
+    const ctx=(((inp.closest('label')||inp.parentElement||{}).textContent)||inp.getAttribute('aria-label')||inp.name||inp.id||'')+'';
+    if(rx.test(ctx))return inp; }
+  return null;
+}
+function readBirdnetControl(rx,def){ const i=findBirdnetControl(rx); const v=i?parseFloat(i.value):NaN; return isNaN(v)?def:v; }
+function setBirdnetControl(rx,val){ const i=findBirdnetControl(rx); if(!i)return false;
+  i.value=val; i.dispatchEvent(new Event('input',{bubbles:true})); i.dispatchEvent(new Event('change',{bubbles:true})); return true; }
+const SENS_RX=/sensitiv|empfindlich/i, THR_RX=/threshold|schwelle|confidence|wahrschein|min/i;
 
 /* ---------- STYLES (Vollbild, handy-optimiert) ---------- */
 const CSS=`
@@ -404,13 +494,14 @@ function viewJagen(){
 function viewSammlung(){
   const owned=Object.keys(S.species).length;
   let rar=0,rarN='–';Object.values(S.species).forEach(s=>{if(s.rar>rar){rar=s.rar;rarN=s.de;}});
+  const clipMark=k=>(S.clips&&S.clips[k])?'<span class="cnt" style="color:var(--vteal)">▶</span>':'';
   const extra=Object.keys(S.species).filter(k=>!SPECIES.some(s=>s[1]===k)).map(k=>{const r=S.species[k];
-    return `<div class="vj-card"><div class="e">${r.emoji}</div><div class="nm">${r.de}</div>
-      <div class="me">${rarTag(r.rar)}<span class="cnt">×${r.count}</span></div></div>`;}).join('');
+    return `<div class="vj-card" data-k="${k}"><div class="e">${r.emoji}</div><div class="nm">${r.de}</div>
+      <div class="me">${rarTag(r.rar)}<span class="cnt">×${r.count} ${clipMark(k)}</span></div></div>`;}).join('');
   const cards=SPECIES.map(sp=>{const rec=S.species[sp[1]],own=!!rec;
-    return `<div class="vj-card ${own?'':'lock'}">${own&&Date.now()-rec.first<60000?'<span class="vj-new">NEU</span>':''}
+    return `<div class="vj-card ${own?'':'lock'}" ${own?`data-k="${sp[1]}"`:''}>${own&&Date.now()-rec.first<60000?'<span class="vj-new">NEU</span>':''}
       <div class="e">${sp[3]}</div><div class="nm">${sp[0]}</div>
-      <div class="me">${rarTag(sp[4])}<span class="cnt">${own?'×'+rec.count:'—'}</span></div></div>`;}).join('');
+      <div class="me">${rarTag(sp[4])}<span class="cnt">${own?'×'+rec.count+' '+clipMark(sp[1]):'—'}</span></div></div>`;}).join('');
   return `<div class="vj-stripe">
      <div class="vj-stat"><div class="n" style="color:var(--vamber)">${owned}</div><div class="l">Arten</div></div>
      <div class="vj-stat"><div class="n" style="color:var(--vteal)">${S.catches.length}</div><div class="l">Fänge</div></div>
@@ -438,7 +529,12 @@ function viewProfil(){
      <div style="display:flex;justify-content:space-between;font-size:12px;color:var(--vmut);font-family:monospace"><span>${S.xp} XP</span><span>${li.max?'Max':'→ '+li.nextName}</span></div></div>
    <div class="vj-lab">Abzeichen</div>
    <div class="vj-badges">${BADGES.map(b=>`<div class="vj-bd ${have.has(b[0])?'':'lock'}"><span class="be">${b[1]}</span><span class="bn">${b[2]}</span></div>`).join('')}</div>
-   <div class="vj-lab">Einstellungen</div>
+   <div class="vj-lab">Erkennung verbessern</div>
+   <div class="vj-row"><span>📍 Standort ${S.geo?'· '+S.geo.lat.toFixed(2)+', '+S.geo.lon.toFixed(2):''}</span><button class="v" id="vj-geo">${S.geo?'erneuern ›':'aktivieren ›'}</button></div>
+   <div class="vj-row"><span>Empfindlichkeit</span><span style="display:flex;align-items:center;gap:8px"><input type="range" min="0.5" max="1.5" step="0.05" value="${readBirdnetControl(SENS_RX,1).toFixed(2)}" id="vj-sens" style="width:104px;accent-color:var(--vamber)"><span class="v" id="vj-sensv">${readBirdnetControl(SENS_RX,1).toFixed(2)}</span></span></div>
+   <div class="vj-row"><span>Schwelle %</span><span style="display:flex;align-items:center;gap:8px"><input type="range" min="5" max="50" step="1" value="${Math.round(readBirdnetControl(THR_RX,15))}" id="vj-thr" style="width:104px;accent-color:var(--vamber)"><span class="v" id="vj-thrv">${Math.round(readBirdnetControl(THR_RX,15))}</span></span></div>
+   <div class="vj-banner" style="margin-top:8px">Merlin hat keine einstellbare Empfindlichkeit – der größte Hebel ist der <b>Standort</b> (Arten werden nach Region gefiltert). Höhere Empfindlichkeit = mehr Treffer (aber auch mehr Fehlalarme).</div>
+   <div class="vj-lab">Allgemein</div>
    <div class="vj-row"><span>Dein Name</span><button class="v" id="vj-name">ändern ›</button></div>
    <div class="vj-row"><span>Erkennung kalibrieren</span><button class="v" id="vj-cal">${calibrate?'läuft · stoppen':'starten ›'}</button></div>
    <button class="vj-btn sec" id="vj-export" style="margin-top:16px">Daten exportieren</button>
@@ -448,7 +544,12 @@ function viewProfil(){
 
 function wire(c){
   const q=s=>c.querySelector(s);
-  if(q('#vj-startbtn'))q('#vj-startbtn').onclick=()=>{ toggleBirdnet(); setTimeout(syncStart,200); };
+  if(q('#vj-startbtn'))q('#vj-startbtn').onclick=()=>{
+    toggleBirdnet();
+    // Mikro-Mitschnitt an Start/Stopp koppeln (im selben Tastendruck = erlaubt fürs Mikro)
+    if(!micOn){ startMicCapture(); } else { stopMicCapture(); }
+    setTimeout(syncStart,200);
+  };
   if(q('#vj-share'))q('#vj-share').onclick=shareCode;
   if(q('#vj-add'))q('#vj-add').onclick=addFriend;
   if(q('#vj-name'))q('#vj-name').onclick=()=>{const n=prompt('Dein Name:',S.name);if(n){S.name=n.slice(0,20);save();renderContent();}};
@@ -456,6 +557,34 @@ function wire(c){
   if(q('#vj-cal'))q('#vj-cal').onclick=()=>{calibrate=!calibrate;toast(calibrate?'Kalibrierung an':'Kalibrierung aus');renderContent();};
   if(q('#vj-export'))q('#vj-export').onclick=()=>{const b=new Blob([JSON.stringify(S,null,2)],{type:'application/json'});const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download='vogeljagd-daten.json';a.click();toast('💾 Exportiert');};
   if(q('#vj-reset'))q('#vj-reset').onclick=()=>{if(confirm('Alle Spieldaten löschen?')){S=fresh();liveList=[];save();updateHeader();renderContent();toast('Zurückgesetzt');}};
+  if(q('#vj-geo'))q('#vj-geo').onclick=enableLocation;
+  if(q('#vj-sens'))q('#vj-sens').oninput=e=>{const v=parseFloat(e.target.value);const o=c.querySelector('#vj-sensv');if(o)o.textContent=v.toFixed(2);
+    if(!setBirdnetControl(SENS_RX,v))toast('Regler nicht gefunden – ggf. kalibrieren');};
+  if(q('#vj-thr'))q('#vj-thr').oninput=e=>{const v=parseInt(e.target.value,10);const o=c.querySelector('#vj-thrv');if(o)o.textContent=v;
+    CFG.MIN_CONF=v; setBirdnetControl(THR_RX,v);};
+  // Sammlung-Karten anhörbar
+  c.querySelectorAll('.vj-card[data-k]').forEach(card=>card.onclick=()=>openSpeciesDetail(card.dataset.k));
+}
+
+/* ---------- ART-DETAIL + AUDIO ABSPIELEN ---------- */
+let _curAudio=null;
+function openSpeciesDetail(key){
+  const sp=S.species[key]; if(!sp)return;
+  const hasClip=S.clips&&S.clips[key];
+  openModal(`<div style="font-size:52px">${sp.emoji}</div><h2>${sp.de}</h2>
+    <div style="color:var(--vmut);font-size:13px">${sp.sci||''}</div>
+    <div style="margin:12px 0">${rarTag(sp.rar)}</div>
+    <div style="display:flex;justify-content:center;gap:18px;font-family:monospace;font-size:13px;color:var(--vmut);margin-bottom:12px">
+      <span>×${sp.count} gehört</span><span>beste ${sp.best||0}%</span></div>
+    ${hasClip?'<button class="vj-btn" id="vj-play">▶ Aufnahme anhören</button>':'<div class="vj-banner">Noch keine Aufnahme. Beim nächsten Fang (mit laufendem Mikro) wird der Ton automatisch mitgeschnitten.</div>'}
+    <button class="vj-btn sec" id="vj-cl">Schließen</button>`);
+  document.getElementById('vj-cl').onclick=()=>{ if(_curAudio){try{_curAudio.pause();}catch(e){}_curAudio=null;} closeModal(); };
+  const pb=document.getElementById('vj-play');
+  if(pb)pb.onclick=async()=>{
+    const blob=await idbGet(key); if(!blob){toast('Keine Aufnahme gefunden');return;}
+    try{ if(_curAudio){_curAudio.pause();} _curAudio=new Audio(URL.createObjectURL(blob));
+      _curAudio.play(); toast('🔊 Spiele ab …'); }catch(e){ toast('Abspielen nicht möglich'); }
+  };
 }
 
 /* ---------- FREUNDESCODES ---------- */
