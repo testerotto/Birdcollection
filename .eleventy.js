@@ -26,7 +26,7 @@ module.exports = function (eleventyConfig) {
   });
 
   return {
-    pathPrefix: "/real-time-pwa/",
+    pathPrefix: "/",
     dir: { input: "src", includes: "_includes", output: "_site" },
     markdownTemplateEngine: "njk",
     htmlTemplateEngine: "njk",
