@@ -218,17 +218,22 @@ function birdnetButton(){
 }
 function birdnetListening(){ const b=birdnetButton(); return b?/stop/i.test((b.textContent||b.value||'')):false; }
 function toggleBirdnet(){ const b=birdnetButton(); if(b){ b.click(); } else { toast('BirdNET lädt noch …'); } }
-function mirrorLoop(){
-  const src=birdnetCanvas(), dst=document.getElementById('vj-spec');
-  if(src&&dst){
-    const w=dst.clientWidth, h=dst.clientHeight;
-    if(w&&h){ if(dst.width!==Math.round(w*DPR)){dst.width=Math.round(w*DPR);dst.height=Math.round(h*DPR);}
-      const ctx=dst.getContext('2d');
-      try{ ctx.drawImage(src,0,0,dst.width,dst.height); }
-      catch(e){ ctx.fillStyle='#0a1512'; ctx.fillRect(0,0,dst.width,dst.height); }
-    }
+// Spektrogramm: den ECHTEN BirdNET-Canvas in unser Feld verschieben (zeigt 2D & WebGL korrekt)
+let specTries=0;
+function stashSpectrogram(){
+  const stash=document.getElementById('vj-spec-stash'), content=document.getElementById('vj-content');
+  if(srcCanvas && stash && content && content.contains(srcCanvas) && srcCanvas.parentElement!==stash){
+    stash.appendChild(srcCanvas);
   }
-  requestAnimationFrame(mirrorLoop);
+}
+function placeSpectrogram(){
+  const host=document.getElementById('vj-spechost'); if(!host)return;
+  const cv=birdnetCanvas();
+  if(!cv){ if(specTries++<24) setTimeout(placeSpectrogram,500); return; }
+  specTries=0;
+  cv.style.width='100%'; cv.style.height='100%'; cv.style.display='block';
+  cv.removeAttribute('width-hint');
+  if(cv.parentElement!==host) host.appendChild(cv);
 }
 function syncStart(){
   const btn=document.getElementById('vj-startbtn'); if(!btn)return;
@@ -352,13 +357,13 @@ function build(){
     </div>
   </div>`);
   document.body.appendChild(app);
+  document.body.appendChild(el('<div id="vj-spec-stash" style="position:absolute;left:-99999px;top:0;width:1px;height:1px;overflow:hidden"></div>'));
   document.body.appendChild(el('<div id="vj-toast"></div>'));
   document.body.appendChild(el('<div id="vj-modal"><div class="sc"></div><div class="bx" id="vj-modalbx"></div></div>'));
   document.getElementById('vj-modal').querySelector('.sc').onclick=closeModal;
   app.querySelectorAll('#vj-nav button').forEach(b=>b.onclick=()=>{curTab=b.dataset.t;
     app.querySelectorAll('#vj-nav button').forEach(x=>x.classList.toggle('on',x===b));renderContent();});
   updateHeader(); renderContent();
-  requestAnimationFrame(mirrorLoop);
   setInterval(syncStart,900);
 }
 function toast(m){const t=document.getElementById('vj-toast');if(!t)return;t.textContent=m;t.classList.add('show');clearTimeout(t._t);t._t=setTimeout(()=>t.classList.remove('show'),2300);}
@@ -370,11 +375,13 @@ function rarTag(r){const c=['','#9fb3a8','#6fb6a0','#f2a65a','#d98ad9','#e7c878'
 
 function renderContent(){
   const c=document.getElementById('vj-content'); if(!c)return;
+  stashSpectrogram();                 // echten Canvas vor dem Wipe in Sicherheit bringen
   if(curTab==='jagen')c.innerHTML=viewJagen();
   else if(curTab==='sammlung')c.innerHTML=viewSammlung();
   else if(curTab==='rangliste')c.innerHTML=viewRangliste();
   else c.innerHTML=viewProfil();
   wire(c); syncStart();
+  if(curTab==='jagen') placeSpectrogram();   // echten Canvas ins Spektrogramm-Feld holen
 }
 
 function viewJagen(){
@@ -389,7 +396,7 @@ function viewJagen(){
       <div class="r"><span class="conf">${it.conf}%</span>${st}</div></div>`;
   }).join('') : `<div class="vj-empty">Drück <b>Start</b> und halte das Handy Richtung Gesang – erkannte Vögel erscheinen hier.</div>`;
   return `
-    <div class="vj-specwrap"><span class="vj-speclab">BirdNET · Live</span><canvas id="vj-spec"></canvas></div>
+    <div class="vj-specwrap"><span class="vj-speclab">BirdNET · Live</span><div id="vj-spechost" style="width:100%;height:100%"></div></div>
     <button class="vj-start" id="vj-startbtn">▶  Start</button>
     <div class="vj-secthd"><h3>Live erkannt</h3><span class="m">Sperre: 1 Std/Art</span></div>
     ${det}`;
