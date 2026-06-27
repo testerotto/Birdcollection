@@ -15,7 +15,7 @@
 /* ---------- KONFIG (bei Bedarf anpassen) ---------- */
 const CFG = {
   AUTO_CAPTURE: true,          // DOM automatisch beobachten
-  MIN_CONF: 15,                // Mindest-% zum Sammeln (passend zur App-Schwelle)
+  MIN_CONF: 95,                // Mindest-% zum Sammeln (passend zur App-Schwelle)
   COOLDOWN_MS: 3600000,        // gleiche Art erst nach 1 STUNDE wieder zählbar (übersteht Neuladen)
   // CSS-Selektor des Detektions-Containers (leer = ganzes Dokument beobachten).
   DETECTION_CONTAINER: ''
