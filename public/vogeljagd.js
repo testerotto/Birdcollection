@@ -15,10 +15,9 @@
 /* ---------- KONFIG (bei Bedarf anpassen) ---------- */
 const CFG = {
   AUTO_CAPTURE: true,          // DOM automatisch beobachten
-  MIN_CONF: 10,                // Mindest-% zum Sammeln
-  COOLDOWN_MS: 25000,          // gleiche Art erst nach 25 s erneut sammeln
+  MIN_CONF: 15,                // Mindest-% zum Sammeln (passend zur App-Schwelle)
+  COOLDOWN_MS: 3600000,        // gleiche Art erst nach 1 STUNDE wieder zählbar (übersteht Neuladen)
   // CSS-Selektor des Detektions-Containers (leer = ganzes Dokument beobachten).
-  // Falls AUTO zu viel/zu wenig fängt, hier den Container der Trefferliste eintragen.
   DETECTION_CONTAINER: ''
 };
 
@@ -102,7 +101,7 @@ function registerCatch(inf,conf){
   const t=todayStr();
   if(S.lastDay!==t){ if(S.lastDay){const d=(new Date(t)-new Date(S.lastDay))/86400000;S.streak=d===1?S.streak+1:1;}else S.streak=1; S.lastDay=t; }
   if(!S.species[k])S.species[k]={count:0,first:Date.now(),best:0,de:inf.de,emoji:inf.emoji,rar:inf.rar,sci:inf.sci};
-  S.species[k].count++; S.species[k].best=Math.max(S.species[k].best,conf);
+  S.species[k].count++; S.species[k].best=Math.max(S.species[k].best,conf); S.species[k].last=Date.now();
   S.catches.unshift({k,t:Date.now(),conf}); if(S.catches.length>800)S.catches.length=800;
   S.xp+=pts; checkBadges(); save();
   return {inf,isNew,pts,conf,k};
@@ -128,13 +127,13 @@ function resolveSpecies(common, sci){
   return {key, de:(common||sci), sci:(sci||''), emoji:'🐦', rar:2};
 }
 
-// Texte, die KEINE Treffer sind (Status-/Hinweismeldungen) – hart ausschließen
+// Texte, die KEINE Treffer sind (Status-/Einstellungs-/Hinweistexte) – hart ausschließen
 function isNoise(t){
-  return /keine detekt|no detection|detections will|tippe auf|tap '?start|modell bereit|nehme auf|inferenz|wahrschein|^settings$|einstellung/i.test(t);
+  return /keine detekt|no detection|detections will|tippe auf|tap '?start|modell bereit|nehme auf|inferenz|wahrschein|standortfilter|geolocation|geolokal|use geo|filters? species|filtert|sensitiv|empfindlich|schwelle|threshold|interval|mic gain|rumble|high-?pass|hochpass|spektrogramm|spectrogram|colormap|viridis|magma|inferno|plasma|turbo|cubehelix|frequenz|frequency|amplitude|duration|grid|app language|label language|sprache|^settings|einstellung|coordinates|koordinaten|awaiting|close|schließen/i.test(t);
 }
 
-// Aus dem Karten-Text {common, sci, conf} ziehen. Eine echte Treffer-Karte
-// enthält IMMER einen wissenschaftlichen Namen (z.B. "Corvus monedula").
+// Aus dem Karten-Text {common, sci, conf} ziehen. Eine echte Treffer-Karte enthält
+// IMMER (a) einen wissenschaftlichen Namen und (b) eine echte Prozent-Konfidenz.
 function extractDetection(text){
   text = (text||'').replace(/\s+/g,' ').trim();
   if(!text || text.length>160) return null;
@@ -143,9 +142,10 @@ function extractDetection(text){
   if(!sciM) return null;
   const sci = sciM[1]+' '+sciM[2];
   const before = text.slice(0, sciM.index);                 // alles vor dem wiss. Namen
-  const pm = before.match(/(\d{1,3})(?:[.,]\d+)?\s*%/);     // Konfidenz (vor dem wiss. Namen)
-  const conf = pm ? parseInt(pm[1],10) : 75;
-  let common = pm ? before.slice(0, before.indexOf(pm[0])) : before;
+  const pm = before.match(/(\d{1,3})(?:[.,]\d+)?\s*%/);     // Konfidenz MUSS vor dem wiss. Namen stehen
+  if(!pm) return null;                                       // keine echte %-Zahl -> kein Treffer
+  const conf = parseInt(pm[1],10);
+  let common = before.slice(0, before.indexOf(pm[0]));
   common = common.replace(/[•·:|]/g,' ').replace(/\s+/g,' ').trim();
   if(!common || common.length<2) common = sci;
   return {common, sci, conf};
@@ -153,12 +153,13 @@ function extractDetection(text){
 
 function reportDetection(d){
   if(!d) return;
-  const conf = (d.conf==null||isNaN(d.conf)) ? 75 : Math.round(d.conf);
+  const conf = (d.conf==null||isNaN(d.conf)) ? 0 : Math.round(d.conf);
   if(conf < CFG.MIN_CONF) return;
   const inf = resolveSpecies(d.common, d.sci);
   const now = Date.now();
-  if(lastSeen[inf.key] && now-lastSeen[inf.key] < CFG.COOLDOWN_MS) return;
-  lastSeen[inf.key] = now;
+  // persistente Zeitsperre: letzter Fang dieser Art aus dem gespeicherten Stand
+  const sp = S.species[inf.key];
+  if(sp && sp.last && now - sp.last < CFG.COOLDOWN_MS) return;
   const res = registerCatch(inf, conf);
   renderAll();
   if(res.isNew) celebrate(res); else toast('🎙️ '+res.inf.de+' · +'+res.pts+' XP');
