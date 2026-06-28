@@ -15,7 +15,8 @@
 /* ---------- KONFIG (bei Bedarf anpassen) ---------- */
 const CFG = {
   AUTO_CAPTURE: true,          // DOM automatisch beobachten
-  MIN_CONF: 95,                // Mindest-% zum Sammeln (passend zur App-Schwelle)
+  SHOW_CONF: 5,                // ab wann ein Treffer in der Live-Liste ERSCHEINT
+  COUNT_CONF: 50,              // ab wann ein Treffer wirklich GEZÄHLT/gesammelt wird
   COOLDOWN_MS: 3600000,        // gleiche Art erst nach 1 STUNDE wieder zählbar (übersteht Neuladen)
   // CSS-Selektor des Detektions-Containers (leer = ganzes Dokument beobachten).
   DETECTION_CONTAINER: ''
@@ -83,10 +84,13 @@ const BADGES=[["frueh","🌅","Frühaufsteher"],["nacht","🦉","Nachtschwärmer
  ["serie7","🔥","7-Tage-Serie"],["hundert","💯","100 Fänge"]];
 
 function fresh(){return {name:"Spieler",avatar:"🐦",xp:0,catches:[],species:{},streak:0,lastDay:null,
-  friends:[],badges:[],seenIntro:false,clips:{},geo:null};}
+  friends:[],badges:[],seenIntro:false,clips:{},geo:null,showConf:5,countConf:50};}
 let S=load();
 function load(){try{const r=localStorage.getItem(KEY);if(r)return Object.assign(fresh(),JSON.parse(r));}catch(e){}return fresh();}
 function save(){try{localStorage.setItem(KEY,JSON.stringify(S));}catch(e){}}
+// gespeicherte Schwellen übernehmen
+CFG.SHOW_CONF = (typeof S.showConf==='number')?S.showConf:5;
+CFG.COUNT_CONF = (typeof S.countConf==='number')?S.countConf:50;
 
 const todayStr=()=>new Date().toISOString().slice(0,10);
 function levelInfo(){let i=0;for(let k=0;k<LEVELS.length;k++)if(S.xp>=LEVELS[k][0])i=k;
@@ -97,14 +101,16 @@ function levelInfo(){let i=0;for(let k=0;k<LEVELS.length;k++)if(S.xp>=LEVELS[k][
 function registerCatch(inf,conf){
   const k=inf.key;
   const isNew=!S.species[k];
-  let pts=RAR_PTS[inf.rar]; if(isNew)pts*=3;
+  let base=RAR_PTS[inf.rar]; if(isNew)base*=3;
+  const confBonus=Math.round(RAR_PTS[inf.rar]*(conf/100));   // bis +100% des Basiswerts bei 100%
+  const pts=base+confBonus;
   const t=todayStr();
   if(S.lastDay!==t){ if(S.lastDay){const d=(new Date(t)-new Date(S.lastDay))/86400000;S.streak=d===1?S.streak+1:1;}else S.streak=1; S.lastDay=t; }
   if(!S.species[k])S.species[k]={count:0,first:Date.now(),best:0,de:inf.de,emoji:inf.emoji,rar:inf.rar,sci:inf.sci};
   S.species[k].count++; S.species[k].best=Math.max(S.species[k].best,conf); S.species[k].last=Date.now();
   S.catches.unshift({k,t:Date.now(),conf}); if(S.catches.length>800)S.catches.length=800;
   S.xp+=pts; checkBadges(); save();
-  return {inf,isNew,pts,conf,k};
+  return {inf,isNew,pts,confBonus,conf,k};
 }
 function checkBadges(){
   const have=new Set(S.badges),h=new Date().getHours(),n=Object.keys(S.species).length;
@@ -143,7 +149,9 @@ function extractDetection(text){
 }
 
 /* ---------- LIVE-TREFFER + COOLDOWN-STATUS ---------- */
-let liveList=[]; // [{key,de,sci,emoji,conf,t}]
+let liveList=[];        // [{key,de,sci,emoji,peak,counted,t}]
+let sessionPeak={};     // key -> höchste %-Sicherheit in dieser Session
+function resetSession(){ sessionPeak={}; liveList=[]; }
 function cdStatus(key){
   const sp=S.species[key]; if(!sp||!sp.last) return {caught:false};
   const rem=CFG.COOLDOWN_MS-(Date.now()-sp.last);
@@ -151,19 +159,25 @@ function cdStatus(key){
 }
 function handleDetection(d){
   if(!d) return;
-  const conf=Math.round(d.conf); if(isNaN(conf)||conf<CFG.MIN_CONF) return;
+  const conf=Math.round(d.conf); if(isNaN(conf)||conf<CFG.SHOW_CONF) return;  // unter Anzeige-Schwelle
   const inf=resolveSpecies(d.common,d.sci);
   const now=Date.now();
+  const peak = sessionPeak[inf.key] = Math.max(sessionPeak[inf.key]||0, conf);  // Höchstwert merken
   const cd=cdStatus(inf.key);
-  liveList=liveList.filter(x=>x.key!==inf.key);
-  liveList.unshift({key:inf.key,de:inf.de,sci:inf.sci,emoji:inf.emoji,conf,t:now});
-  if(liveList.length>8)liveList.length=8;
-  if(!cd.caught){
-    const res=registerCatch(inf,conf);
+  // zählen erst ab COUNT_CONF und wenn nicht in der 1h-Sperre
+  let counted = cd.caught;
+  if(peak>=CFG.COUNT_CONF && !cd.caught){
+    const res=registerCatch(inf,peak);
     saveClip(inf.key);
     updateHeader();
-    if(res.isNew) celebrate(res); else toast('🎙️ '+inf.de+' · +'+res.pts+' XP');
+    counted=true;
+    const bonus=res.confBonus?(' (+'+res.confBonus+' für '+peak+'%)'):'';
+    if(res.isNew) celebrate(res); else toast('🎙️ '+inf.de+' · +'+res.pts+' XP'+bonus);
   }
+  // Live-Liste zeigt den HÖCHSTWERT der Session (nicht den schwankenden Momentanwert)
+  liveList=liveList.filter(x=>x.key!==inf.key);
+  liveList.unshift({key:inf.key,de:inf.de,sci:inf.sci,emoji:inf.emoji,peak,counted,t:now});
+  if(liveList.length>8)liveList.length=8;
   if(curTab==='jagen') renderContent();
 }
 function onDetection(name,conf,sci){ handleDetection({common:name,sci:sci||'',conf}); }
@@ -477,18 +491,19 @@ function renderContent(){
 function viewJagen(){
   const det = liveList.length ? liveList.map(it=>{
     const cd=cdStatus(it.key);
-    const fresh = !cd.caught;
-    const st = cd.caught
-      ? `<span class="st cd">✓ schon · noch ${cd.min} Min</span>`
-      : `<span class="st go">+ zählt!</span>`;
-    return `<div class="vj-det ${fresh?'fresh':''}"><span class="e">${it.emoji}</span>
+    const reached = it.peak>=CFG.COUNT_CONF;
+    let st, cls='';
+    if(cd.caught){ st=`<span class="st cd">✓ gezählt · noch ${cd.min} Min</span>`; }
+    else if(reached){ st=`<span class="st go">✓ zählt!</span>`; cls='fresh'; }
+    else { st=`<span class="st cd">ab ${CFG.COUNT_CONF}% · noch nicht</span>`; }
+    return `<div class="vj-det ${cls}"><span class="e">${it.emoji}</span>
       <div class="d"><b>${it.de}</b><small>${it.sci||''}</small></div>
-      <div class="r"><span class="conf">${it.conf}%</span>${st}</div></div>`;
-  }).join('') : `<div class="vj-empty">Drück <b>Start</b> und halte das Handy Richtung Gesang – erkannte Vögel erscheinen hier.</div>`;
+      <div class="r"><span class="conf">${it.peak}%</span>${st}</div></div>`;
+  }).join('') : `<div class="vj-empty">Drück <b>Start</b> und halte das Handy Richtung Gesang – erkannte Vögel erscheinen hier (Höchstwert pro Session).</div>`;
   return `
     <div class="vj-specwrap"><span class="vj-speclab">BirdNET · Live</span><div id="vj-spechost" style="width:100%;height:100%"></div></div>
     <button class="vj-start" id="vj-startbtn">▶  Start</button>
-    <div class="vj-secthd"><h3>Live erkannt</h3><span class="m">Sperre: 1 Std/Art</span></div>
+    <div class="vj-secthd"><h3>Live erkannt</h3><span class="m">zählt ab ${CFG.COUNT_CONF}% · 1 Std/Art</span></div>
     ${det}`;
 }
 function viewSammlung(){
@@ -532,8 +547,9 @@ function viewProfil(){
    <div class="vj-lab">Erkennung verbessern</div>
    <div class="vj-row"><span>📍 Standort ${S.geo?'· '+S.geo.lat.toFixed(2)+', '+S.geo.lon.toFixed(2):''}</span><button class="v" id="vj-geo">${S.geo?'erneuern ›':'aktivieren ›'}</button></div>
    <div class="vj-row"><span>Empfindlichkeit</span><span style="display:flex;align-items:center;gap:8px"><input type="range" min="0.5" max="1.5" step="0.05" value="${readBirdnetControl(SENS_RX,1).toFixed(2)}" id="vj-sens" style="width:104px;accent-color:var(--vamber)"><span class="v" id="vj-sensv">${readBirdnetControl(SENS_RX,1).toFixed(2)}</span></span></div>
-   <div class="vj-row"><span>Schwelle %</span><span style="display:flex;align-items:center;gap:8px"><input type="range" min="5" max="50" step="1" value="${Math.round(readBirdnetControl(THR_RX,15))}" id="vj-thr" style="width:104px;accent-color:var(--vamber)"><span class="v" id="vj-thrv">${Math.round(readBirdnetControl(THR_RX,15))}</span></span></div>
-   <div class="vj-banner" style="margin-top:8px">Merlin hat keine einstellbare Empfindlichkeit – der größte Hebel ist der <b>Standort</b> (Arten werden nach Region gefiltert). Höhere Empfindlichkeit = mehr Treffer (aber auch mehr Fehlalarme).</div>
+   <div class="vj-row"><span>Anzeigen ab %</span><span style="display:flex;align-items:center;gap:8px"><input type="range" min="1" max="50" step="1" value="${CFG.SHOW_CONF}" id="vj-show" style="width:104px;accent-color:var(--vteal)"><span class="v" id="vj-showv">${CFG.SHOW_CONF}</span></span></div>
+   <div class="vj-row"><span>Zählen ab %</span><span style="display:flex;align-items:center;gap:8px"><input type="range" min="20" max="95" step="5" value="${CFG.COUNT_CONF}" id="vj-count" style="width:104px;accent-color:var(--vamber)"><span class="v" id="vj-countv">${CFG.COUNT_CONF}</span></span></div>
+   <div class="vj-banner" style="margin-top:8px">„Anzeigen ab" steuert, ab welcher Sicherheit ein Vogel in der Live-Liste auftaucht. „Zählen ab" legt fest, ab wann er wirklich in die Sammlung kommt – und je näher an 100 %, desto mehr Bonus-XP. Merlin hat keine einstellbare Empfindlichkeit; der größte Hebel ist der <b>Standort</b>.</div>
    <div class="vj-lab">Allgemein</div>
    <div class="vj-row"><span>Dein Name</span><button class="v" id="vj-name">ändern ›</button></div>
    <div class="vj-row"><span>Erkennung kalibrieren</span><button class="v" id="vj-cal">${calibrate?'läuft · stoppen':'starten ›'}</button></div>
@@ -545,10 +561,11 @@ function viewProfil(){
 function wire(c){
   const q=s=>c.querySelector(s);
   if(q('#vj-startbtn'))q('#vj-startbtn').onclick=()=>{
+    const starting = !birdnetListening();
     toggleBirdnet();
-    // Mikro-Mitschnitt an Start/Stopp koppeln (im selben Tastendruck = erlaubt fürs Mikro)
+    if(starting){ resetSession(); }              // neue Session -> Höchstwerte zurücksetzen
     if(!micOn){ startMicCapture(); } else { stopMicCapture(); }
-    setTimeout(syncStart,200);
+    setTimeout(()=>{ syncStart(); if(curTab==='jagen') renderContent(); },200);
   };
   if(q('#vj-share'))q('#vj-share').onclick=shareCode;
   if(q('#vj-add'))q('#vj-add').onclick=addFriend;
@@ -559,9 +576,11 @@ function wire(c){
   if(q('#vj-reset'))q('#vj-reset').onclick=()=>{if(confirm('Alle Spieldaten löschen?')){S=fresh();liveList=[];save();updateHeader();renderContent();toast('Zurückgesetzt');}};
   if(q('#vj-geo'))q('#vj-geo').onclick=enableLocation;
   if(q('#vj-sens'))q('#vj-sens').oninput=e=>{const v=parseFloat(e.target.value);const o=c.querySelector('#vj-sensv');if(o)o.textContent=v.toFixed(2);
-    if(!setBirdnetControl(SENS_RX,v))toast('Regler nicht gefunden – ggf. kalibrieren');};
-  if(q('#vj-thr'))q('#vj-thr').oninput=e=>{const v=parseInt(e.target.value,10);const o=c.querySelector('#vj-thrv');if(o)o.textContent=v;
-    CFG.MIN_CONF=v; setBirdnetControl(THR_RX,v);};
+    if(!setBirdnetControl(SENS_RX,v))toast('Empfindlichkeits-Regler nicht gefunden');};
+  if(q('#vj-show'))q('#vj-show').oninput=e=>{const v=parseInt(e.target.value,10);const o=c.querySelector('#vj-showv');if(o)o.textContent=v;
+    CFG.SHOW_CONF=v; S.showConf=v; save(); setBirdnetControl(THR_RX,v);};   // steuert auch BirdNETs Schwelle
+  if(q('#vj-count'))q('#vj-count').oninput=e=>{const v=parseInt(e.target.value,10);const o=c.querySelector('#vj-countv');if(o)o.textContent=v;
+    CFG.COUNT_CONF=v; S.countConf=v; save();};
   // Sammlung-Karten anhörbar
   c.querySelectorAll('.vj-card[data-k]').forEach(card=>card.onclick=()=>openSpeciesDetail(card.dataset.k));
 }
