@@ -447,10 +447,25 @@ const CSS=`
 #vj-modal.open{display:flex}
 #vj-modal .sc{position:absolute;inset:0;background:rgba(0,0,0,.6)}
 #vj-modal .bx{position:relative;width:100%;max-width:380px;background:var(--vbg2);border:1px solid var(--vline);border-radius:20px;padding:22px;text-align:center}
+.vj-chips{display:flex;gap:7px;flex-wrap:wrap;margin:10px 0 14px}
+.vj-chip{background:var(--vsurf);border:1px solid var(--vline);color:var(--vmut);padding:7px 13px;border-radius:30px;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit}
+.vj-chip.on{background:var(--vamber);color:#241405;border-color:var(--vamber)}
+.vj-tbl{border:1px solid var(--vline);border-radius:14px;overflow:hidden}
+.vj-trow{display:grid;grid-template-columns:auto 1fr auto;gap:11px;align-items:center;padding:11px 13px;border-bottom:1px solid var(--vline);cursor:pointer}
+.vj-trow:last-child{border-bottom:none}
+.vj-trow:active{background:var(--vsurf)}
+.vj-trow .e{font-size:23px}
+.vj-trow .nm{min-width:0}.vj-trow .nm b{font-size:14px;display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.vj-trow .nm small{color:var(--vmut);font-size:11px;font-style:italic}
+.vj-trow .tm{text-align:right;flex:none}
+.vj-trow .tm .pct{font-family:monospace;font-weight:700;color:var(--vgold);font-size:15px;display:block}
+.vj-trow .tm .sub{color:var(--vmut);font-size:11px;font-family:monospace}
 `;
 
 /* ---------- AUFBAU ---------- */
 let curTab='jagen';
+let listSort='zuletzt';   // 'zuletzt' | 'beste' | 'haeufig' | 'az'
+let listFilter='';
 function el(html){const d=document.createElement('div');d.innerHTML=html.trim();return d.firstChild;}
 function build(){
   const st=document.createElement('style');st.textContent=CSS;document.head.appendChild(st);
@@ -466,6 +481,7 @@ function build(){
     <div class="vj-bottomnav" id="vj-nav">
       <button data-t="jagen" class="on"><span class="i">🎙️</span><span class="l">Jagen</span></button>
       <button data-t="sammlung"><span class="i">📖</span><span class="l">Sammlung</span></button>
+      <button data-t="liste"><span class="i">📋</span><span class="l">Liste</span></button>
       <button data-t="rangliste"><span class="i">🏆</span><span class="l">Rangliste</span></button>
       <button data-t="profil"><span class="i">⚙️</span><span class="l">Profil</span></button>
     </div>
@@ -492,6 +508,7 @@ function renderContent(){
   stashSpectrogram();                 // echten Canvas vor dem Wipe in Sicherheit bringen
   if(curTab==='jagen')c.innerHTML=viewJagen();
   else if(curTab==='sammlung')c.innerHTML=viewSammlung();
+  else if(curTab==='liste')c.innerHTML=viewListe();
   else if(curTab==='rangliste')c.innerHTML=viewRangliste();
   else c.innerHTML=viewProfil();
   wire(c); syncStart();
@@ -532,6 +549,36 @@ function viewSammlung(){
      <div class="vj-stat"><div class="n" style="color:var(--vteal)">${S.catches.length}</div><div class="l">Fänge</div></div>
      <div class="vj-stat"><div class="n" style="color:var(--vgold);font-size:15px">${rarN}</div><div class="l">Seltenster</div></div>
    </div><div class="vj-grid">${extra}${cards}</div>`;
+}
+function fmtWhen(ts){
+  if(!ts)return '–';
+  const diff=Date.now()-ts;
+  if(diff<60000)return 'gerade';
+  if(diff<3600000)return 'vor '+Math.floor(diff/60000)+' Min';
+  if(diff<86400000)return 'vor '+Math.floor(diff/3600000)+' Std';
+  const d=new Date(ts),p=n=>String(n).padStart(2,'0');
+  return p(d.getDate())+'.'+p(d.getMonth()+1)+'. '+p(d.getHours())+':'+p(d.getMinutes());
+}
+function viewListe(){
+  let rows=Object.keys(S.species).map(k=>{const s=S.species[k];
+    return {k,de:s.de,sci:s.sci,emoji:s.emoji,rar:s.rar,count:s.count||0,best:s.best||0,last:s.last||s.first||0,first:s.first||0,clip:!!(S.clips&&S.clips[k])};});
+  const f=listFilter.trim().toLowerCase();
+  if(f)rows=rows.filter(r=>(r.de+' '+r.sci).toLowerCase().includes(f));
+  if(listSort==='beste')rows.sort((a,b)=>b.best-a.best||b.last-a.last);
+  else if(listSort==='haeufig')rows.sort((a,b)=>b.count-a.count||b.best-a.best);
+  else if(listSort==='az')rows.sort((a,b)=>a.de.localeCompare(b.de));
+  else rows.sort((a,b)=>b.last-a.last);   // zuletzt
+  const chip=(id,l)=>`<button class="vj-chip ${listSort===id?'on':''}" data-sort="${id}">${l}</button>`;
+  const head=`<input class="vj-input" id="vj-search" placeholder="🔍 Art suchen …" value="${listFilter.replace(/"/g,'&quot;')}">
+    <div class="vj-chips">${chip('zuletzt','Zuletzt')}${chip('beste','Beste %')}${chip('haeufig','Häufigste')}${chip('az','A–Z')}</div>`;
+  if(!rows.length) return head+`<div class="vj-empty">${f?'Nichts gefunden.':'Noch nichts entdeckt – drück im Jagen-Tab auf Start.'}</div>`;
+  const body=rows.map(r=>`<div class="vj-trow" data-k="${r.k}">
+     <span class="e">${r.emoji}</span>
+     <div class="nm"><b>${r.de}</b><small>${r.sci||''}</small></div>
+     <div class="tm"><span class="pct">${r.best}%</span><span class="sub">×${r.count} · ${fmtWhen(r.last)}${r.clip?' · ▶':''}</span></div>
+   </div>`).join('');
+  return head+`<div class="vj-tbl">${body}</div>
+    <div class="vj-banner" style="margin-top:12px">Tipp: Zeile antippen für Details und Aufnahme. „Zuletzt" zeigt deine neuesten Funde, „Beste %" die sichersten, „Häufigste" die meistgehörten.</div>`;
 }
 function viewRangliste(){
   const me={name:S.name,avatar:S.avatar,arten:Object.keys(S.species).length,faenge:S.catches.length,me:true};
@@ -593,6 +640,12 @@ function wire(c){
     CFG.COUNT_CONF=v; S.countConf=v; save();};
   // Sammlung-Karten anhörbar
   c.querySelectorAll('.vj-card[data-k]').forEach(card=>card.onclick=()=>openSpeciesDetail(card.dataset.k));
+  // Liste: Sortierung, Suche, Zeilen
+  c.querySelectorAll('.vj-chip[data-sort]').forEach(b=>b.onclick=()=>{listSort=b.dataset.sort;renderContent();});
+  c.querySelectorAll('.vj-trow[data-k]').forEach(r=>r.onclick=()=>openSpeciesDetail(r.dataset.k));
+  const se=q('#vj-search');
+  if(se)se.oninput=e=>{ listFilter=e.target.value; renderContent();
+    const n=document.getElementById('vj-search'); if(n){ n.focus(); const v=n.value; try{n.setSelectionRange(v.length,v.length);}catch(_){} } };
 }
 
 /* ---------- ART-DETAIL + AUDIO ABSPIELEN ---------- */
