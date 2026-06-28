@@ -164,15 +164,25 @@ function handleDetection(d){
   const now=Date.now();
   const peak = sessionPeak[inf.key] = Math.max(sessionPeak[inf.key]||0, conf);  // Höchstwert merken
   const cd=cdStatus(inf.key);
-  // zählen erst ab COUNT_CONF und wenn nicht in der 1h-Sperre
+  const sp0=S.species[inf.key];
   let counted = cd.caught;
   if(peak>=CFG.COUNT_CONF && !cd.caught){
+    // echter (neuer) Fang – volle Punkte
     const res=registerCatch(inf,peak);
     saveClip(inf.key);
     updateHeader();
     counted=true;
     const bonus=res.confBonus?(' (+'+res.confBonus+' für '+peak+'%)'):'';
     if(res.isNew) celebrate(res); else toast('🎙️ '+inf.de+' · +'+res.pts+' XP'+bonus);
+  } else if(cd.caught && sp0 && peak>sp0.best){
+    // innerhalb der 1h-Sperre GENAUER gehört -> nur Bonus für die Verbesserung, KEIN neuer Fang
+    const rar=sp0.rar||2;
+    const delta=Math.round(RAR_PTS[rar]*peak/100)-Math.round(RAR_PTS[rar]*sp0.best/100);
+    sp0.best=peak;                    // Prozentzahl aktualisieren
+    if(delta>0){ S.xp+=delta; updateHeader(); toast('🔎 '+inf.de+' genauer gehört: '+peak+'% · +'+delta+' XP'); }
+    saveClip(inf.key);               // bessere Aufnahme sichern
+    save();
+    counted=true;
   }
   // Live-Liste zeigt den HÖCHSTWERT der Session (nicht den schwankenden Momentanwert)
   liveList=liveList.filter(x=>x.key!==inf.key);
@@ -181,7 +191,7 @@ function handleDetection(d){
   if(curTab==='jagen') renderContent();
 }
 function onDetection(name,conf,sci){ handleDetection({common:name,sci:sci||'',conf}); }
-window.Vogeljagd={ report:onDetection, reportDetection:handleDetection, extract:extractDetection, state:()=>S, version:'2.0' };
+window.Vogeljagd={ report:onDetection, reportDetection:handleDetection, extract:extractDetection, state:()=>S, version:'2.4' };
 
 function purgeBogus(){
   let changed=false;
